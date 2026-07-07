@@ -1,0 +1,106 @@
+# ── POC : API Vélib' → producers → Kafka (KRaft) → PySpark Structured Streaming ──
+# Architecture simple à 3 containers, conçue pour être lancée avec : docker compose up --build
+# Pour la version cluster multi-nœuds, voir : docker-compose.cluster.yml
+
+services:
+
+  # ── 1. Broker Kafka (mode KRaft, sans Zookeeper) ──────────────────────────
+  kafka:
+    image: apache/kafka:latest
+    container_name: kafka
+    hostname: kafka
+    restart: unless-stopped
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"        # 1 seul broker en POC
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: "/var/lib/kafka/data"
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    ports:
+      - "9092:9092"
+    volumes:
+      # Volume nommé : les messages Kafka survivent à un docker compose down
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks:
+      - velib-network
+
+  # ── 2. Producers Python ────────────────────────────────────────────────────
+  producers:
+    build:
+      context: ./producers
+    container_name: producers
+    restart: unless-stopped
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      DISPO_INTERVAL_SECONDS: "60"       # Disponibilité : toutes les 60 secondes
+      STATIONS_INTERVAL_SECONDS: "21600" # Stations : toutes les 6 heures
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f producer.py > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - velib-network
+
+  # ── 3. Consumer PySpark Structured Streaming ───────────────────────────────
+  pyspark:
+    build:
+      context: ./pyspark
+    container_name: pyspark
+    restart: unless-stopped
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      SPARK_CHECKPOINT_DIR: "/app/data/checkpoints"   # reprise après crash
+      RAW_OUTPUT_DIR: "/app/data/raw"
+      # ── BigQuery (optionnel) ───────────────────────────────────────────────
+      # Passer BQ_ENABLED à "true" une fois GCP configuré (sa-key.json + project ID)
+      BQ_ENABLED: "true"
+      GCP_PROJECT_ID: "velib-data-498413"         # ← remplace par ton projet GCP
+      GCP_BQ_DATASET: "raw"
+      GOOGLE_APPLICATION_CREDENTIALS: "/secrets/sa-key.json"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      # Spark prend ~60s à démarrer avant que le process Python soit stable
+      test: ["CMD-SHELL", "pgrep -f spark_streaming_job.py > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+    volumes:
+      - ./data:/app/data          # données raw + checkpoints persistés sur le host
+      - ./secrets:/secrets:ro     # clé GCP (ignorée si BigQuery non configuré)
+    networks:
+      - velib-network
+
+# ── Volumes nommés ─────────────────────────────────────────────────────────────
+volumes:
+  kafka-data:
+    driver: local
+    # Les messages Kafka sont conservés dans ce volume entre les redémarrages.
+    # POC : rétention par défaut (7 jours). En production, configurer KAFKA_LOG_RETENTION_HOURS.
+
+# ── Réseau partagé ─────────────────────────────────────────────────────────────
+networks:
+  velib-network:
+    driver: bridge

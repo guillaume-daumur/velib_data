@@ -1,0 +1,239 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# ARCHITECTURE CLUSTER — VERSION AVANCÉE / OPTIONNELLE
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Cette version étend le POC (docker-compose.yml) vers une architecture
+# distribuée plus proche d'un environnement de production.
+#
+# Topologie :
+#   kafka-1 ─┐
+#   kafka-2 ─┼─ cluster Kafka KRaft (3 brokers, réplication factor = 3)
+#   kafka-3 ─┘
+#
+#   spark-master ─┐
+#   spark-worker-1 ┼─ cluster Spark standalone (1 master + 2 workers)
+#   spark-worker-2 ┘
+#
+#   producers ──► kafka-1:9092,kafka-2:9092,kafka-3:9092
+#   spark-job ──► spark://spark-master:7077 (consomme depuis Kafka)
+#
+# Lancer :
+#   docker compose -f docker-compose.cluster.yml up --build
+#
+# Arrêter :
+#   docker compose -f docker-compose.cluster.yml down -v
+#
+# Notes :
+# - Les 3 brokers Kafka partagent le même CLUSTER_ID (obligatoire en KRaft).
+# - Le facteur de réplication 3 garantit qu'un broker peut tomber sans perte.
+# - Les Spark workers sont extensibles : ajouter spark-worker-3, etc.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Bloc de variables Kafka communes aux 3 brokers (pour éviter la répétition)
+x-kafka-common: &kafka-common
+  image: apache/kafka:latest
+  restart: unless-stopped
+  environment: &kafka-common-env
+    # Les 3 brokers se connaissent via KAFKA_CONTROLLER_QUORUM_VOTERS
+    KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093"
+    KAFKA_PROCESS_ROLES: "broker,controller"
+    KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+    KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+    KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+    # Réplication = 3 : chaque topic est copié sur les 3 brokers
+    # → si 1 broker tombe, les données sont toujours disponibles sur les 2 autres
+    KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "3"
+    KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "3"
+    KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "2"      # 2/3 brokers suffisent pour écrire
+    KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    KAFKA_DEFAULT_REPLICATION_FACTOR: "3"
+    KAFKA_MIN_INSYNC_REPLICAS: "2"
+    # Même CLUSTER_ID pour tous les nœuds du cluster KRaft
+    CLUSTER_ID: "VelibClusterKRaftProd001"
+  networks:
+    - velib-cluster-network
+
+services:
+
+  # ── Kafka Broker 1 ─────────────────────────────────────────────────────────
+  kafka-1:
+    <<: *kafka-common
+    container_name: kafka-1
+    hostname: kafka-1
+    environment:
+      <<: *kafka-common-env
+      KAFKA_NODE_ID: "1"
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-1:9092"
+      KAFKA_LOG_DIRS: "/var/lib/kafka/data"
+    volumes:
+      - kafka-1-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ── Kafka Broker 2 ─────────────────────────────────────────────────────────
+  kafka-2:
+    <<: *kafka-common
+    container_name: kafka-2
+    hostname: kafka-2
+    environment:
+      <<: *kafka-common-env
+      KAFKA_NODE_ID: "2"
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-2:9092"
+      KAFKA_LOG_DIRS: "/var/lib/kafka/data"
+    volumes:
+      - kafka-2-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ── Kafka Broker 3 ─────────────────────────────────────────────────────────
+  kafka-3:
+    <<: *kafka-common
+    container_name: kafka-3
+    hostname: kafka-3
+    environment:
+      <<: *kafka-common-env
+      KAFKA_NODE_ID: "3"
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-3:9092"
+      KAFKA_LOG_DIRS: "/var/lib/kafka/data"
+    volumes:
+      - kafka-3-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ── Spark Master ────────────────────────────────────────────────────────────
+  # Rôle : coordonner le cluster, distribuer les tâches aux workers.
+  # UI disponible sur http://localhost:8080
+  spark-master:
+    image: apache/spark:latest
+    container_name: spark-master
+    hostname: spark-master
+    restart: unless-stopped
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master",
+              "--host", "spark-master", "--port", "7077", "--webui-port", "8080"]
+    environment:
+      SPARK_MODE: "master"
+    ports:
+      - "8080:8080"   # Spark Master Web UI
+      - "7077:7077"   # Spark Master port
+    networks:
+      - velib-cluster-network
+
+  # ── Spark Worker 1 ──────────────────────────────────────────────────────────
+  # Les workers exécutent les tâches distribuées par le master.
+  # Ajouter spark-worker-3, 4... pour augmenter la capacité de calcul.
+  spark-worker-1:
+    image: apache/spark:latest
+    container_name: spark-worker-1
+    hostname: spark-worker-1
+    restart: unless-stopped
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker",
+              "spark://spark-master:7077"]
+    environment:
+      SPARK_MODE: "worker"
+      SPARK_WORKER_CORES: "2"
+      SPARK_WORKER_MEMORY: "2g"
+    depends_on:
+      - spark-master
+    networks:
+      - velib-cluster-network
+
+  # ── Spark Worker 2 ──────────────────────────────────────────────────────────
+  spark-worker-2:
+    image: apache/spark:latest
+    container_name: spark-worker-2
+    hostname: spark-worker-2
+    restart: unless-stopped
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker",
+              "spark://spark-master:7077"]
+    environment:
+      SPARK_MODE: "worker"
+      SPARK_WORKER_CORES: "2"
+      SPARK_WORKER_MEMORY: "2g"
+    depends_on:
+      - spark-master
+    networks:
+      - velib-cluster-network
+
+  # ── Producers Python ────────────────────────────────────────────────────────
+  # En cluster, les producers envoient vers les 3 brokers (load balancing Kafka natif).
+  # Kafka choisit le broker leader pour chaque partition.
+  producers:
+    build:
+      context: ./producers
+    container_name: producers
+    restart: unless-stopped
+    environment:
+      # Bootstrap servers = tous les brokers (Kafka fera le load balancing)
+      KAFKA_BOOTSTRAP_SERVERS: "kafka-1:9092,kafka-2:9092,kafka-3:9092"
+      DISPO_INTERVAL_SECONDS: "60"
+      STATIONS_INTERVAL_SECONDS: "21600"
+    depends_on:
+      kafka-1:
+        condition: service_healthy
+      kafka-2:
+        condition: service_healthy
+      kafka-3:
+        condition: service_healthy
+    networks:
+      - velib-cluster-network
+
+  # ── Job PySpark Streaming ────────────────────────────────────────────────────
+  # Soumet le job de streaming sur le cluster Spark standalone.
+  # SPARK_MASTER_URL = spark://spark-master:7077 active le mode cluster dans le code.
+  spark-job:
+    build:
+      context: ./pyspark
+    container_name: spark-job
+    restart: unless-stopped
+    environment:
+      # Cluster Kafka : tous les brokers comme bootstrap servers
+      KAFKA_BOOTSTRAP_SERVERS: "kafka-1:9092,kafka-2:9092,kafka-3:9092"
+      # Mode cluster Spark standalone (bascule dans create_spark_session())
+      SPARK_MASTER_URL: "spark://spark-master:7077"
+      SPARK_CHECKPOINT_DIR: "/app/data/checkpoints"
+      RAW_OUTPUT_DIR: "/app/data/raw"
+      GCP_PROJECT_ID: "MY_PROJECT_ID"
+      GCP_BQ_DATASET: "raw"
+      GOOGLE_APPLICATION_CREDENTIALS: "/secrets/sa-key.json"
+    depends_on:
+      - spark-master
+      - spark-worker-1
+      - spark-worker-2
+      - kafka-1
+      - kafka-2
+      - kafka-3
+    volumes:
+      - ./data:/app/data
+      - ./secrets:/secrets:ro
+    networks:
+      - velib-cluster-network
+
+# ── Volumes séparés par broker ─────────────────────────────────────────────────
+# Chaque broker a son propre volume : les données persistent indépendamment.
+# Si kafka-2 tombe, kafka-1 et kafka-3 gardent leur volume intact.
+volumes:
+  kafka-1-data:
+    driver: local
+  kafka-2-data:
+    driver: local
+  kafka-3-data:
+    driver: local
+
+networks:
+  velib-cluster-network:
+    driver: bridge
