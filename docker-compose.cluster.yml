@@ -50,6 +50,14 @@ x-kafka-common: &kafka-common
     KAFKA_MIN_INSYNC_REPLICAS: "2"
     # Même CLUSTER_ID pour tous les nœuds du cluster KRaft
     CLUSTER_ID: "VelibClusterKRaftProd001"
+    # Heap réduit : par défaut 1G/broker (3G cumulés) sature une VM Docker à 6G partagée
+    # avec le cluster Spark, provoquant du swap et des timeouts d'élection Raft en cascade.
+    KAFKA_HEAP_OPTS: "-Xmx512m -Xms512m"
+    # Timeouts du quorum controller assouplis pour tolérer les pauses JVM (GC, swap)
+    # sur un hôte partagé — évite les réélections en rafale sous charge CPU/mémoire.
+    KAFKA_CONTROLLER_QUORUM_ELECTION_TIMEOUT_MS: "5000"
+    KAFKA_CONTROLLER_QUORUM_FETCH_TIMEOUT_MS: "10000"
+    KAFKA_CONTROLLER_QUORUM_REQUEST_TIMEOUT_MS: "5000"
   networks:
     - velib-cluster-network
 
@@ -119,7 +127,9 @@ services:
   # Rôle : coordonner le cluster, distribuer les tâches aux workers.
   # UI disponible sur http://localhost:8080
   spark-master:
-    image: apache/spark:latest
+    # Version figée sur 3.5.1 pour matcher pyspark==3.5.1 utilisé par spark-job
+    # (apache/spark:latest a basculé sur Spark 4.x, incompatible en RPC avec un client 3.5.1)
+    image: apache/spark:3.5.1
     container_name: spark-master
     hostname: spark-master
     restart: unless-stopped
@@ -137,7 +147,7 @@ services:
   # Les workers exécutent les tâches distribuées par le master.
   # Ajouter spark-worker-3, 4... pour augmenter la capacité de calcul.
   spark-worker-1:
-    image: apache/spark:latest
+    image: apache/spark:3.5.1
     container_name: spark-worker-1
     hostname: spark-worker-1
     restart: unless-stopped
@@ -145,16 +155,23 @@ services:
               "spark://spark-master:7077"]
     environment:
       SPARK_MODE: "worker"
-      SPARK_WORKER_CORES: "2"
-      SPARK_WORKER_MEMORY: "2g"
+      # Réduit de 2 cœurs/2g à 1 cœur/1g : le job (micro-batchs JSON toutes les 30s) est léger,
+      # et cette VM (6G RAM / 4 cœurs) doit aussi héberger les 3 brokers Kafka.
+      SPARK_WORKER_CORES: "1"
+      SPARK_WORKER_MEMORY: "1g"
     depends_on:
       - spark-master
+    # Les tâches d'écriture s'exécutent sur les workers (exécuteurs), pas dans spark-job (driver).
+    # Même volume que spark-job pour que le chemin /app/data existe aussi ici (sortie JSON locale).
+    volumes:
+      - ./data:/app/data
+      - ./secrets:/secrets:ro
     networks:
       - velib-cluster-network
 
   # ── Spark Worker 2 ──────────────────────────────────────────────────────────
   spark-worker-2:
-    image: apache/spark:latest
+    image: apache/spark:3.5.1
     container_name: spark-worker-2
     hostname: spark-worker-2
     restart: unless-stopped
@@ -162,10 +179,13 @@ services:
               "spark://spark-master:7077"]
     environment:
       SPARK_MODE: "worker"
-      SPARK_WORKER_CORES: "2"
-      SPARK_WORKER_MEMORY: "2g"
+      SPARK_WORKER_CORES: "1"
+      SPARK_WORKER_MEMORY: "1g"
     depends_on:
       - spark-master
+    volumes:
+      - ./data:/app/data
+      - ./secrets:/secrets:ro
     networks:
       - velib-cluster-network
 

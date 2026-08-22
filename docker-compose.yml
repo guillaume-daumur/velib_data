@@ -71,11 +71,11 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
       SPARK_CHECKPOINT_DIR: "/app/data/checkpoints"   # reprise après crash
       RAW_OUTPUT_DIR: "/app/data/raw"
-      # ── BigQuery (optionnel) ───────────────────────────────────────────────
-      # Passer BQ_ENABLED à "true" une fois GCP configuré (sa-key.json + project ID)
-      BQ_ENABLED: "true"
+      # ── Cloud Storage (optionnel) ────────────────────────────────────────────
+      # Passer GCS_ENABLED à "true" une fois GCP configuré (sa-key.json + bucket)
+      GCS_ENABLED: "true"
       GCP_PROJECT_ID: "velib-data-498413"         # ← remplace par ton projet GCP
-      GCP_BQ_DATASET: "raw"
+      GCS_BUCKET_NAME: "velib-data-498413-raw"    # ← remplace par ton bucket
       GOOGLE_APPLICATION_CREDENTIALS: "/secrets/sa-key.json"
     depends_on:
       kafka:

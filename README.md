@@ -6,7 +6,7 @@ Pipeline de streaming temps réel pour les données Vélib' Paris.
 API Open Data Paris
        │
        ├─ disponibilité (toutes les 60s)  ──► topic velib_disponibilite ──►┐
-       │                                                                    ├─► PySpark Structured Streaming ──► BigQuery (raw)
+       │                                                                    ├─► PySpark Structured Streaming ──► Cloud Storage (JSON brut)
        └─ stations (toutes les 6h)        ──► topic velib_stations      ──►┘
 ```
 
@@ -14,13 +14,17 @@ API Open Data Paris
 
 ## Architecture — 3 containers (POC)
 
-| Container   | Rôle                                                              |
-|-------------|-------------------------------------------------------------------|
-| `kafka`     | Broker Kafka (mode KRaft, sans Zookeeper)                        |
-| `producers` | Appelle l'API Vélib', envoie les records JSON dans Kafka          |
-| `pyspark`   | Lit Kafka en streaming, parse les messages, écrit dans BigQuery   |
+| Container   | Rôle                                                                  |
+|-------------|------------------------------------------------------------------------|
+| `kafka`     | Broker Kafka (mode KRaft, sans Zookeeper)                            |
+| `producers` | Appelle l'API Vélib', envoie les records JSON dans Kafka              |
+| `pyspark`   | Lit Kafka en streaming, parse les messages, écrit en JSON brut dans Cloud Storage |
 
-Pour la version distribuée multi-nœuds, voir [Lancer la version cluster](#lancer-la-version-cluster-optionnelle).
+> **Note sur la version cluster** : une version distribuée (3 brokers Kafka + cluster Spark, voir
+> `docker-compose.cluster.yml`) a été développée et testée avec succès, mais a été abandonnée comme
+> configuration par défaut : elle nécessite plus de ressources (RAM/CPU) que n'en offre la machine de
+> développement utilisée pour ce projet. Le code reste disponible et documenté à titre de démonstration
+> d'architecture distribuée — voir [docs/architecture_poc_vs_cluster.md](docs/architecture_poc_vs_cluster.md).
 
 ---
 
@@ -101,7 +105,9 @@ data/
 | `SPARK_CHECKPOINT_DIR`          | `/app/data/checkpoints` | Répertoire des checkpoints Spark         |
 | `RAW_OUTPUT_DIR`                | `/app/data/raw`         | Répertoire de sortie JSON local          |
 | `SPARK_MASTER_URL`              | `local[2]`              | Master Spark (`spark://...` en cluster)  |
-| `GCP_PROJECT_ID`                | `MY_PROJECT_ID`         | Projet GCP pour BigQuery                 |
+| `GCS_ENABLED`                   | `false`                 | `true` pour écrire dans Cloud Storage    |
+| `GCP_PROJECT_ID`                | `MY_PROJECT_ID`         | Projet GCP                               |
+| `GCS_BUCKET_NAME`               | (vide)                  | Bucket Cloud Storage cible                |
 | `GOOGLE_APPLICATION_CREDENTIALS`| `/secrets/sa-key.json`  | Clé de service account GCP              |
 
 ---
@@ -226,23 +232,26 @@ docker compose -f docker-compose.cluster.yml logs -f spark-master
 |-----------------|-----------------------------------------------|
 | `kafka-1/2/3`   | 3 brokers Kafka, réplication factor 3         |
 | `spark-master`  | Coordinateur du cluster Spark (UI : :8080)    |
-| `spark-worker-1/2` | Executeurs Spark (2 workers, 2 CPU, 2 Go) |
+| `spark-worker-1/2` | Executeurs Spark (2 workers, 1 CPU, 1 Go) |
 | `producers`     | Producers Python → bootstrap 3 brokers        |
 | `spark-job`     | Job de streaming → `spark://spark-master:7077`|
 
 ---
 
-## BigQuery — connexion
+## Cloud Storage — connexion
 
-Voir le guide complet dans [bigquery/schema.sql](bigquery/schema.sql).
+1. Créer un bucket dans la [console Cloud Storage](https://console.cloud.google.com/storage)
+2. Créer (ou réutiliser) un service account avec le rôle **Storage Object Creator** sur ce bucket
+3. Télécharger la clé JSON → `secrets/sa-key.json`
+4. Mettre à jour `GCP_PROJECT_ID` et `GCS_BUCKET_NAME` dans `docker-compose.yml`
+5. Relancer : `docker compose up --build`
 
-Résumé :
-1. Créer le dataset `raw` dans la console BigQuery
-2. Coller et exécuter le DDL de `bigquery/schema.sql` (remplacer `MY_PROJECT_ID`)
-3. Créer un service account avec les rôles **BigQuery Data Editor** + **BigQuery Job User**
-4. Télécharger la clé JSON → `secrets/sa-key.json`
-5. Mettre à jour `GCP_PROJECT_ID` dans `docker-compose.yml`
-6. Relancer : `docker compose up --build`
+Les données sont écrites en JSON Lines (1 enregistrement par ligne), un objet par micro-batch (30s),
+partitionné par date : `gs://<bucket>/<table>/AAAA/MM/JJ/epoch-<n>.json`.
+
+> Ce projet a d'abord été prototypé avec BigQuery comme destination (voir
+> [bigquery/schema.sql](bigquery/schema.sql), conservé à titre de référence) avant de basculer sur du
+> JSON brut dans Cloud Storage.
 
 ---
 
@@ -253,7 +262,9 @@ Résumé :
 | [docs/architecture_poc_vs_cluster.md](docs/architecture_poc_vs_cluster.md) | Justification des nœuds, montée en charge     |
 | [docs/fault_tolerance_and_recovery.md](docs/fault_tolerance_and_recovery.md) | Tolérance aux pannes, plan de récupération   |
 | [docs/competency_mapping.md](docs/competency_mapping.md)             | Matrice de couverture des compétences        |
-| [bigquery/schema.sql](bigquery/schema.sql)                           | DDL BigQuery pour les 2 tables raw           |
+| [bigquery/schema.sql](bigquery/schema.sql)                           | DDL BigQuery — ancienne destination, non utilisée actuellement |
+| [bigquery/schema_silver.sql](bigquery/schema_silver.sql)             | DDL de la table silver (typée, dédoublonnée)  |
+| [cloud_functions/silver_loader/README.md](cloud_functions/silver_loader/README.md) | Couche silver temps réel : architecture, staging, procédure de déploiement |
 
 ---
 

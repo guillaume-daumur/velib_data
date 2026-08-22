@@ -1,2 +1,2 @@
 pyspark==3.5.1
-google-cloud-bigquery
+google-cloud-storage
