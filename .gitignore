@@ -1,0 +1,2 @@
+# Spark Structured Streaming checkpoints (local run state, not source data)
+data/checkpoints/
