@@ -42,7 +42,6 @@ Pendant cette période, un consumer peut rejouer les messages depuis le début.
 #### Checkpoints PySpark
 ```
 /app/data/checkpoints/velib_disponibilite/
-/app/data/checkpoints/velib_stations/
 ```
 Les checkpoints Spark Structured Streaming sauvegardent :
 1. **Les offsets Kafka** traités avec succès → pas de double traitement ni de perte.
@@ -223,7 +222,6 @@ docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
 
 # 4. Les fichiers data/raw/ sont bien écrits ?
 ls -lh data/raw/velib_disponibilite/
-ls -lh data/raw/velib_stations/
 
 # 5. Les checkpoints sont bien à jour ?
 ls -lh data/checkpoints/velib_disponibilite/

@@ -73,7 +73,7 @@ docker exec kafka-1 /opt/kafka/bin/kafka-topics.sh \
 **Règle Spark workers :** 1 worker par partition Kafka consommée simultanément (idéalement).
 
 ```
-2 topics × ~1-2 partitions chacun = 2 workers minimum pour le parallélisme optimal.
+1 topic (velib_disponibilite) × 2 partitions = 2 workers minimum pour le parallélisme optimal.
 ```
 
 ---

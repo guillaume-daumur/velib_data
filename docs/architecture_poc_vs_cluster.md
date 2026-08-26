@@ -161,3 +161,21 @@ Producers → Kafka (3 brokers, round-robin par partition)
 Kafka assure la répartition de la **production** (les messages sont distribués sur les partitions selon la clé ou round-robin).
 
 Spark assure la répartition du **traitement** (chaque partition est traitée par un executor différent).
+
+---
+
+## Limite résiduelle du cluster Docker Compose — et l'évolution GKE
+
+Même avec 3 brokers Kafka et un cluster Spark, `docker-compose.cluster.yml`
+tourne entièrement sur **une seule machine hôte** (une seule VM). La
+réplication Kafka protège d'un **broker qui crashe** (panne logicielle),
+mais pas d'une **panne de la VM elle-même** (panne matérielle, coupure
+zone) — si cette VM tombe, les 3 brokers et le cluster Spark tombent
+ensemble.
+
+Pour une vraie tolérance de panne au niveau **infrastructure** (répartition
+sur plusieurs machines physiques/zones, avec reprise automatique), voir
+l'architecture cible [docs/architecture_gke_kubernetes.md](architecture_gke_kubernetes.md)
+— documentée avec procédure de déploiement et chiffrage des coûts, non
+déployée sur ce projet (le pipeline touchant à sa fin, la migration n'était
+pas rentable sur l'horizon restant).

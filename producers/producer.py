@@ -1,9 +1,10 @@
 """
 Vélib' Kafka Producer
 
-Deux boucles tournent en parallèle dans des threads séparés :
-  - run_dispo_loop  : disponibilité temps réel, toutes les DISPO_INTERVAL_SECONDS
-  - run_stations_loop : emplacements des stations, toutes les STATIONS_INTERVAL_SECONDS
+Une seule boucle (run_dispo_loop) interroge l'API "disponibilité en temps réel",
+toutes les DISPO_INTERVAL_SECONDS. Cette API est un sur-ensemble strict de l'API
+"emplacement des stations" (mêmes champs station + champs dynamiques), donc un
+seul producteur Kafka / un seul topic suffit, sans perte d'information.
 
 Format de chaque message Kafka :
 {
@@ -193,29 +194,13 @@ def run_dispo_loop(producer: Producer) -> None:
         except Exception as exc:
             logger.error(f"Erreur dans la boucle disponibilité : {exc}", exc_info=True)
 
-        logger.info(f"Prochaine récupération disponibilité dans {config.DISPO_INTERVAL_SECONDS}s.")
-        time.sleep(config.DISPO_INTERVAL_SECONDS)
-
-
-def run_stations_loop(producer: Producer) -> None:
-    """
-    Boucle infinie : récupère les emplacements des stations et publie dans Kafka.
-    Données quasi-statiques → fréquence STATIONS_INTERVAL_SECONDS (défaut 6h).
-    Premier appel au démarrage immédiat.
-    """
-    logger.info("Thread stations démarré.")
-    while True:
-        try:
-            request_ts = datetime.now(timezone.utc).isoformat()
-            logger.info("Récupération des données de stations...")
-            records = fetch_all_records(config.DATASET_EMPLACE)
-            if records:
-                publish_records(producer, config.TOPIC_STATIONS, config.DATASET_EMPLACE, records, request_ts)
-        except Exception as exc:
-            logger.error(f"Erreur dans la boucle stations : {exc}", exc_info=True)
-
-        logger.info(f"Prochaine récupération stations dans {config.STATIONS_INTERVAL_SECONDS}s.")
-        time.sleep(config.STATIONS_INTERVAL_SECONDS)
+        interval = config.get_effective_interval(config.DISPO_INTERVAL_SECONDS)
+        if interval != config.DISPO_INTERVAL_SECONDS:
+            logger.info(f"Mode nuit actif (creux 2h-5h, lun-ven) — prochaine récupération "
+                        f"disponibilité dans {interval}s au lieu de {config.DISPO_INTERVAL_SECONDS}s.")
+        else:
+            logger.info(f"Prochaine récupération disponibilité dans {interval}s.")
+        time.sleep(interval)
 
 
 # ── Point d'entrée ─────────────────────────────────────────────────────────────
@@ -224,31 +209,22 @@ if __name__ == "__main__":
     # 1. Attendre que Kafka soit opérationnel (complète le healthcheck Docker)
     wait_for_kafka()
 
-    # 2. Créer les topics explicitement (auto-create Kafka est aussi activé)
-    ensure_topics([config.TOPIC_DISPO, config.TOPIC_STATIONS])
+    # 2. Créer le topic explicitement (auto-create Kafka est aussi activé)
+    ensure_topics([config.TOPIC_DISPO])
 
-    # 3. Créer le producer Kafka partagé entre les deux threads
+    # 3. Créer le producer Kafka
     producer = make_producer()
 
-    # 4. Lancer les deux boucles dans des threads daemon
-    threads = [
-        threading.Thread(
-            target=run_dispo_loop,
-            args=(producer,),
-            daemon=True,
-            name="dispo-producer",
-        ),
-        threading.Thread(
-            target=run_stations_loop,
-            args=(producer,),
-            daemon=True,
-            name="stations-producer",
-        ),
-    ]
-    for t in threads:
-        t.start()
+    # 4. Lancer la boucle de polling dans un thread daemon
+    thread = threading.Thread(
+        target=run_dispo_loop,
+        args=(producer,),
+        daemon=True,
+        name="dispo-producer",
+    )
+    thread.start()
 
-    logger.info("Les deux threads producer sont démarrés. En attente...")
+    logger.info("Le thread producer est démarré. En attente...")
 
     # 5. Maintenir le thread principal vivant
     try:

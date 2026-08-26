@@ -25,11 +25,15 @@ services:
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_LOG_DIRS: "/var/lib/kafka/data"
       CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+      # Réduit le bruit de logs (dump de config au démarrage, chargement des
+      # 50 partitions __consumer_offsets) — cf. kafka/log4j2.properties.
+      KAFKA_LOG4J_OPTS: "-Dlog4j2.configurationFile=file:/opt/kafka/config/custom-log4j2.properties"
     ports:
       - "9092:9092"
     volumes:
       # Volume nommé : les messages Kafka survivent à un docker compose down
       - kafka-data:/var/lib/kafka/data
+      - ./kafka/log4j2.properties:/opt/kafka/config/custom-log4j2.properties:ro
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
       interval: 15s
@@ -47,8 +51,15 @@ services:
     restart: unless-stopped
     environment:
       KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
-      DISPO_INTERVAL_SECONDS: "60"       # Disponibilité : toutes les 60 secondes
-      STATIONS_INTERVAL_SECONDS: "21600" # Stations : toutes les 6 heures
+      DISPO_INTERVAL_SECONDS: "60"       # Disponibilité (inclut les champs station) : toutes les 60s
+      # ── Mode nuit (empreinte carbone) ─────────────────────────────────────
+      # Multiplie les intervalles ci-dessus par NIGHT_MODE_MULTIPLIER entre
+      # NIGHT_MODE_START_HOUR et NIGHT_MODE_END_HOUR, du lundi au vendredi
+      # (heure de Paris) : créneau de très faible usage Vélib'.
+      NIGHT_MODE_ENABLED: "true"
+      NIGHT_MODE_START_HOUR: "2"
+      NIGHT_MODE_END_HOUR: "5"
+      NIGHT_MODE_MULTIPLIER: "4"
     depends_on:
       kafka:
         condition: service_healthy
@@ -90,6 +101,41 @@ services:
     volumes:
       - ./data:/app/data          # données raw + checkpoints persistés sur le host
       - ./secrets:/secrets:ro     # clé GCP (ignorée si BigQuery non configuré)
+    networks:
+      - velib-network
+
+  # ── 4. Monitoring — santé Kafka/KRaft/PySpark/producers → BigQuery ─────────
+  # Voir monitoring/README.md pour la procédure de création de la table BigQuery.
+  monitoring:
+    build:
+      context: ./monitoring
+    container_name: monitoring
+    restart: unless-stopped
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      SPARK_CHECKPOINT_DIR: "/app/data/checkpoints"   # lecture seule des checkpoints Spark
+      DISPO_INTERVAL_SECONDS: "60"                    # doit matcher le service producers
+      MONITOR_INTERVAL_SECONDS: "60"
+      GCP_PROJECT_ID: "velib-data-498413"             # ← remplace par ton projet GCP
+      BQ_MONITORING_DATASET: "monitoring"
+      GOOGLE_APPLICATION_CREDENTIALS: "/secrets/sa-key.json"
+      # ── Mode nuit (empreinte carbone) — doit matcher le service producers ──
+      NIGHT_MODE_ENABLED: "true"
+      NIGHT_MODE_START_HOUR: "2"
+      NIGHT_MODE_END_HOUR: "5"
+      NIGHT_MODE_MULTIPLIER: "4"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f monitor.py > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    volumes:
+      - ./data:/app/data:ro       # lecture seule : ne fait que lire les checkpoints Spark
+      - ./secrets:/secrets:ro     # clé GCP pour l'écriture BigQuery
     networks:
       - velib-network
 

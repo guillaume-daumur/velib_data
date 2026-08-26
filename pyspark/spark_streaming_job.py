@@ -1,9 +1,10 @@
 """
 Vélib' PySpark Structured Streaming Consumer — sortie Cloud Storage
 
-Lit deux topics Kafka, parse les messages JSON, et écrit le JSON brut dans Cloud Storage :
+Lit le topic Kafka velib_disponibilite (seule API retenue au périmètre — elle
+inclut nativement les champs station), parse les messages JSON, et écrit le
+JSON brut dans Cloud Storage :
   - velib_disponibilite → gs://GCS_BUCKET_NAME/velib_disponibilite/AAAA/MM/JJ/...
-  - velib_stations      → gs://GCS_BUCKET_NAME/velib_stations/AAAA/MM/JJ/...
 
 Variables d'environnement :
   KAFKA_BOOTSTRAP_SERVERS       : adresse du broker (défaut : kafka:9092)
@@ -41,7 +42,6 @@ OUTPUT_BASE     = os.getenv("RAW_OUTPUT_DIR", "/app/data/raw")
 GCS_ENABLED     = os.getenv("GCS_ENABLED", "false").lower() == "true"
 
 TOPIC_DISPO    = "velib_disponibilite"
-TOPIC_STATIONS = "velib_stations"
 
 # Uniquement le connecteur Kafka — Cloud Storage est géré via le client Python (google-cloud-storage),
 # sans JAR Spark, ce qui évite toute incompatibilité de version.
@@ -74,21 +74,6 @@ DISPO_RECORD_SCHEMA = StructType([
     StructField("code_insee_commune",           StringType(),  True),
     StructField("station_opening_hours",        StringType(),  True),
 ])
-
-STATIONS_RECORD_SCHEMA = StructType([
-    StructField("stationcode",                  StringType(),  True),
-    StructField("name",                         StringType(),  True),
-    StructField("capacity",                     IntegerType(), True),
-    StructField("coordonnees_geo", StructType([
-        StructField("lat", DoubleType(), True),
-        StructField("lon", DoubleType(), True),
-    ]), True),
-    StructField("nom_arrondissement_communes",  StringType(),  True),
-    StructField("code_insee_commune",           StringType(),  True),
-    StructField("station_opening_hours",        StringType(),  True),
-    StructField("duedate",                      StringType(),  True),
-])
-
 
 # ── SparkSession ───────────────────────────────────────────────────────────────
 
@@ -145,28 +130,6 @@ def parse_dispo(raw_df):
         col("r.coordonnees_geo"),
         col("r.nom_arrondissement_communes"), col("r.code_insee_commune"),
         col("r.station_opening_hours"),
-    )
-
-
-def parse_stations(raw_df):
-    env = (
-        raw_df.select(
-            col("timestamp").alias("kafka_timestamp"),
-            from_json(col("value").cast(StringType()), ENVELOPE_SCHEMA).alias("env"),
-        )
-        .select(
-            col("kafka_timestamp"),
-            col("env.dataset_id"),
-            to_timestamp(col("env.request_timestamp")).alias("request_timestamp"),
-            from_json(col("env.record"), STATIONS_RECORD_SCHEMA).alias("r"),
-        )
-    )
-    return env.select(
-        "request_timestamp", "kafka_timestamp", "dataset_id",
-        col("r.stationcode"), col("r.name"), col("r.capacity"),
-        col("r.coordonnees_geo"),
-        col("r.nom_arrondissement_communes"), col("r.code_insee_commune"),
-        col("r.station_opening_hours"), col("r.duedate"),
     )
 
 
@@ -242,7 +205,7 @@ if __name__ == "__main__":
     mode = f"Cloud Storage (gs://{GCS_BUCKET_NAME})" if GCS_ENABLED else f"JSON local ({OUTPUT_BASE})"
     print(f"[VelibStreaming] Output mode : {mode}", flush=True)
 
-    # ── Stream disponibilité ───────────────────────────────────────────────────
+    # ── Stream disponibilité (seul flux retenu — inclut les champs station) ───
     query_dispo = write_stream(
         parse_dispo(read_kafka_stream(spark, TOPIC_DISPO)),
         table="velib_disponibilite",
@@ -250,13 +213,5 @@ if __name__ == "__main__":
         query_name="writer_dispo",
     )
 
-    # ── Stream stations ────────────────────────────────────────────────────────
-    query_stations = write_stream(
-        parse_stations(read_kafka_stream(spark, TOPIC_STATIONS)),
-        table="velib_stations",
-        checkpoint_path=f"{CHECKPOINT_BASE}/velib_stations",
-        query_name="writer_stations",
-    )
-
-    # Bloque jusqu'à l'arrêt d'un des deux streams (erreur ou shutdown)
+    # Bloque jusqu'à l'arrêt du stream (erreur ou shutdown)
     spark.streams.awaitAnyTermination()

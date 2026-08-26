@@ -3,12 +3,15 @@
 Pipeline de streaming temps réel pour les données Vélib' Paris.
 
 ```
-API Open Data Paris
+API Open Data Paris (disponibilité en temps réel — inclut nativement les champs station)
        │
-       ├─ disponibilité (toutes les 60s)  ──► topic velib_disponibilite ──►┐
-       │                                                                    ├─► PySpark Structured Streaming ──► Cloud Storage (JSON brut)
-       └─ stations (toutes les 6h)        ──► topic velib_stations      ──►┘
+       └─ toutes les 60s  ──► topic velib_disponibilite ──► PySpark Structured Streaming ──► Cloud Storage (JSON brut)
 ```
+
+> Le périmètre ne retient qu'une seule API : "disponibilité en temps réel" est un
+> sur-ensemble strict de l'API "emplacement des stations" (mêmes champs station +
+> champs dynamiques), donc un seul producteur Kafka / un seul topic suffit, sans
+> perte d'information.
 
 ---
 
@@ -86,11 +89,9 @@ docker compose logs -f
 ```
 data/
 ├── raw/
-│   ├── velib_disponibilite/   ← JSON (1 micro-batch = 1 fichier, toutes les 30s)
-│   └── velib_stations/
+│   └── velib_disponibilite/   ← JSON (1 micro-batch = 1 fichier, toutes les 30s)
 └── checkpoints/
-    ├── velib_disponibilite/   ← état du streaming Spark (reprise après crash)
-    └── velib_stations/
+    └── velib_disponibilite/   ← état du streaming Spark (reprise après crash)
 ```
 
 ---
@@ -101,7 +102,6 @@ data/
 |---------------------------------|-------------------------|------------------------------------------|
 | `KAFKA_BOOTSTRAP_SERVERS`       | `kafka:9092`            | Adresse du broker Kafka                  |
 | `DISPO_INTERVAL_SECONDS`        | `60`                    | Fréquence de polling disponibilité (s)   |
-| `STATIONS_INTERVAL_SECONDS`     | `21600`                 | Fréquence de polling stations (6h en s)  |
 | `SPARK_CHECKPOINT_DIR`          | `/app/data/checkpoints` | Répertoire des checkpoints Spark         |
 | `RAW_OUTPUT_DIR`                | `/app/data/raw`         | Répertoire de sortie JSON local          |
 | `SPARK_MASTER_URL`              | `local[2]`              | Master Spark (`spark://...` en cluster)  |
@@ -260,15 +260,15 @@ partitionné par date : `gs://<bucket>/<table>/AAAA/MM/JJ/epoch-<n>.json`.
 | Document                                                              | Contenu                                      |
 |-----------------------------------------------------------------------|----------------------------------------------|
 | [docs/architecture_poc_vs_cluster.md](docs/architecture_poc_vs_cluster.md) | Justification des nœuds, montée en charge     |
+| [docs/architecture_gke_kubernetes.md](docs/architecture_gke_kubernetes.md) | Architecture cible GKE (HA infra multi-zone) — documentée, non déployée, avec chiffrage des coûts |
 | [docs/fault_tolerance_and_recovery.md](docs/fault_tolerance_and_recovery.md) | Tolérance aux pannes, plan de récupération   |
 | [docs/competency_mapping.md](docs/competency_mapping.md)             | Matrice de couverture des compétences        |
 | [bigquery/schema.sql](bigquery/schema.sql)                           | DDL BigQuery — ancienne destination, non utilisée actuellement |
-| [bigquery/schema_silver.sql](bigquery/schema_silver.sql)             | DDL de la table silver (typée, dédoublonnée)  |
+| [bigquery/schema_silver.sql](bigquery/schema_silver.sql)             | DDL de la table silver (typée, dédoublonnée, ne garde que les changements réels) |
 | [cloud_functions/silver_loader/README.md](cloud_functions/silver_loader/README.md) | Couche silver temps réel : architecture, staging, procédure de déploiement |
 
 ---
 
 ## Données source
 
-- **Disponibilité** : [velib-disponibilite-en-temps-reel](https://opendata.paris.fr/explore/dataset/velib-disponibilite-en-temps-reel) — actualisé ~chaque minute, aucune clé API.
-- **Stations** : [velib-emplacement-des-stations](https://opendata.paris.fr/explore/dataset/velib-emplacement-des-stations) — données quasi-statiques.
+- **Disponibilité** : [velib-disponibilite-en-temps-reel](https://opendata.paris.fr/explore/dataset/velib-disponibilite-en-temps-reel) — actualisé ~chaque minute, aucune clé API. Seule API retenue au périmètre : elle inclut nativement les champs statiques de station (nom, capacité, coordonnées, horaires) — voir [velib-emplacement-des-stations](https://opendata.paris.fr/explore/dataset/velib-emplacement-des-stations), dont elle est un sur-ensemble strict.
